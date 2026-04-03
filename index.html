@@ -453,7 +453,7 @@ main{max-width:1060px;margin:0 auto;padding:28px 20px 96px}
     <button class="ntab"     onclick="goPage('calendar')">달력</button>
     <button class="ntab"     onclick="goPage('savings')">저축</button>
   </div>
-  <div class="nav-yr">2026</div>
+  <div class="nav-yr">2026 &nbsp;<span id="sync-status" style="font-size:11px;font-weight:500;transition:color .3s"></span></div>
 </nav>
 <main>
 
@@ -707,17 +707,42 @@ main{max-width:1060px;margin:0 auto;padding:28px 20px 96px}
 
 <div class="toast" id="toast-el"></div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot }
+  from "https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBGSWrFq15BoZiNkOZqWGhVaokh7JQNtvk",
+  authDomain: "my-wallet-d6d06.firebaseapp.com",
+  projectId: "my-wallet-d6d06",
+  storageBucket: "my-wallet-d6d06.firebasestorage.app",
+  messagingSenderId: "543904516407",
+  appId: "1:543904516407:web:4800197de82c84ed85f2b2"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+const DOC = doc(db, 'budget', 'main'); // Firestore 문서 경로
+
 const PALETTE=['#3a6b52','#3a5a8a','#a07030','#8a3a3a','#5b3a8a','#3a7a7a','#6b6b3a','#7a3a5a'];
 const SUBPAL =['#74c69d','#91b4e8','#e8c88a','#e88a8a','#c88ae8','#8ae8e8','#e8e88a','#e88ac8'];
 const MO=['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
 
-let S=load();
+// 저장 상태 표시
+function setSyncStatus(state) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  if (state === 'saving')  { el.textContent = '저장 중…'; el.style.color = 'var(--muted)'; }
+  if (state === 'saved')   { el.textContent = '✓ 저장됨';  el.style.color = 'var(--accent)'; }
+  if (state === 'error')   { el.textContent = '⚠ 저장 실패'; el.style.color = 'var(--red)'; }
+  if (state === 'loading') { el.textContent = '불러오는 중…'; el.style.color = 'var(--muted)'; }
+}
 
-function load(){
-  try{const r=localStorage.getItem('budget26v7');if(r)return JSON.parse(r);}catch(e){}
-  return{
-    year:2026,month:new Date().getMonth()+1,
+// 기본 데이터
+function defaultData() {
+  return {
+    year:2026, month:new Date().getMonth()+1,
     varCats:['식비','생활','교통','여가','쇼핑','병원','자기계발','기타'],
     months:{
       '2026-6':{
@@ -745,7 +770,77 @@ function load(){
     ]
   };
 }
-function sv(){try{localStorage.setItem('budget26v7',JSON.stringify(S));}catch(e){}}
+
+let S = defaultData();
+let saveTimer = null;
+let isRemoteUpdate = false; // 원격 업데이트 중 재진입 방지
+
+// Firestore에 저장 (디바운스 500ms — 입력할 때마다 저장하지 않고 잠깐 기다렸다가 한 번만)
+function sv() {
+  // localStorage에도 백업 (오프라인 대비)
+  try { localStorage.setItem('budget26v7', JSON.stringify(S)); } catch(e) {}
+  clearTimeout(saveTimer);
+  setSyncStatus('saving');
+  saveTimer = setTimeout(async () => {
+    try {
+      await setDoc(DOC, JSON.parse(JSON.stringify(S)));
+      setSyncStatus('saved');
+    } catch(e) {
+      console.error('Firestore 저장 실패:', e);
+      setSyncStatus('error');
+    }
+  }, 500);
+}
+
+// 앱 초기 로드 — Firestore에서 데이터 가져오기
+async function initData() {
+  setSyncStatus('loading');
+  try {
+    const snap = await getDoc(DOC);
+    if (snap.exists()) {
+      S = snap.data();
+      // 숫자 키가 문자열로 바뀌는 Firestore 특성 보정
+      if (S.savRows) {
+        S.savRows = S.savRows.map(r => {
+          const months = {};
+          for (let m = 1; m <= 12; m++) months[m] = r.months?.[m] ?? r.months?.[String(m)] ?? 0;
+          return { ...r, months };
+        });
+      }
+    } else {
+      // 첫 접속 — 기본 데이터를 Firestore에 저장
+      await setDoc(DOC, JSON.parse(JSON.stringify(S)));
+    }
+  } catch(e) {
+    console.error('Firestore 로드 실패 — 로컬 데이터 사용:', e);
+    try {
+      const local = localStorage.getItem('budget26v7');
+      if (local) S = JSON.parse(local);
+    } catch(e2) {}
+  }
+  setSyncStatus('saved');
+  render();
+
+  // 실시간 리스너 — 다른 기기에서 저장하면 자동으로 화면 갱신
+  onSnapshot(DOC, (snap) => {
+    if (!snap.exists() || isRemoteUpdate) return;
+    const remote = snap.data();
+    // 현재 편집 중인 달만 무시하지 않고, 전체를 부드럽게 병합
+    isRemoteUpdate = true;
+    S = remote;
+    if (S.savRows) {
+      S.savRows = S.savRows.map(r => {
+        const months = {};
+        for (let m = 1; m <= 12; m++) months[m] = r.months?.[m] ?? r.months?.[String(m)] ?? 0;
+        return { ...r, months };
+      });
+    }
+    try { localStorage.setItem('budget26v7', JSON.stringify(S)); } catch(e) {}
+    render();
+    setTimeout(() => { isRemoteUpdate = false; }, 200);
+  });
+}
+
 function u(){return Math.random().toString(36).slice(2,9);}
 function fmtN(n){return n?n.toLocaleString('ko-KR'):'';}
 function fmt(n){return'₩'+Math.abs(n).toLocaleString('ko-KR');}
@@ -1216,7 +1311,8 @@ function closeModal(id){document.getElementById(id).classList.remove('open');}
 document.querySelectorAll('.overlay').forEach(el=>el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');}));
 function toast(msg){const el=document.getElementById('toast-el');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2400);}
 
-render();
+// 앱 시작
+initData();
 </script>
 </body>
 </html>
